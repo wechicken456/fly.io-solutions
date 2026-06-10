@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"slices"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -33,8 +32,8 @@ type pollRequest struct {
 }
 
 type pollResponse struct {
-	Type string           `json:"type"`
-	Msgs map[string][]any `json:"msgs"`
+	Type string             `json:"type"`
+	Msgs map[string][][]any `json:"msgs"`
 }
 
 type commitOffsetsRequest struct {
@@ -58,6 +57,14 @@ type listCommittedOffsetsResponse struct {
 
 var mu sync.Mutex
 
+func (n *Node) committedOffset(key string) int {
+	committed, ok := n.committed[key]
+	if !ok {
+		return -1
+	}
+	return committed
+}
+
 func (n *Node) handleSend(msg maelstrom.Message) error {
 	var body sendRequest
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
@@ -69,7 +76,7 @@ func (n *Node) handleSend(msg maelstrom.Message) error {
 	n.logs[body.Key] = append(n.logs[body.Key], body.Msg)
 	resp := sendResponse{
 		Type:   "send_ok",
-		Offset: n.counter[body.Key] - 1,
+		Offset: n.counter[body.Key],
 	}
 	n.counter[body.Key]++
 	return n.Reply(msg, resp)
@@ -84,13 +91,19 @@ func (n *Node) handlePoll(msg maelstrom.Message) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	msgs := make(map[string][]any)
+	msgs := make(map[string][][]any)
 	for key, offset := range body.Offsets {
 		if _, ok := n.logs[key]; ok { // ignore unknown keys
-			if offset < n.committed[key] || offset > n.counter[key] {
+
+			loglen := len(n.logs[key])
+			if offset < 0 || offset >= loglen {
 				continue
 			}
-			msgs[key] = slices.Clone(msgs[key])
+			batch := make([][]any, 0, loglen-offset)
+			for i := offset; i < loglen; i++ {
+				batch = append(batch, []any{i, n.logs[key][i]})
+			}
+			msgs[key] = batch
 		}
 	}
 	return n.Reply(msg, pollResponse{
@@ -104,6 +117,19 @@ func (n *Node) handleCommitOffsets(msg maelstrom.Message) error {
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
 		return err
 	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for key, offset := range body.Offsets {
+		if _, ok := n.logs[key]; ok { // ignore unknown keys
+			committed := n.committedOffset(key)
+			if offset < 0 || offset < committed || offset >= n.counter[key] {
+				continue
+			}
+			n.committed[key] = offset
+		}
+	}
+
 	return n.Reply(msg, commitOffsetsResponse{
 		Type: "commit_offsets_ok",
 	})
@@ -114,10 +140,18 @@ func (n *Node) handleListCommittedOffsets(msg maelstrom.Message) error {
 	if err := json.Unmarshal(msg.Body, &body); err != nil {
 		return err
 	}
-	return n.Reply(msg, listCommittedOffsetsResponse{
+	mu.Lock()
+	defer mu.Unlock()
+	msgs := listCommittedOffsetsResponse{
 		Type:    "list_committed_offsets_ok",
 		Offsets: make(map[string]int),
-	})
+	}
+	for _, key := range body.Keys {
+		if committedOffset, ok := n.committed[key]; ok {
+			msgs.Offsets[key] = committedOffset
+		}
+	}
+	return n.Reply(msg, msgs)
 }
 
 func main() {
