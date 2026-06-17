@@ -123,13 +123,13 @@ func (n *Node) handlePoll(msg maelstrom.Message) error {
 
 	msgs := make(map[string][][]any)
 	for key, reqOffset := range body.Offsets {
-		val, err := linKV.Read(context.Background(), "counter_"+key)
-		if err != nil {
-			continue
-		}
-		counter := toInt64(val)
+		//val, err := linKV.Read(context.Background(), "counter_"+key)
+		//if err != nil {
+		//	continue
+		//}
+		//counter := toInt64(val)
 		var batch [][]any
-		for i := reqOffset; i < counter; i++ {
+		for i := reqOffset; i <= reqOffset; i++ {
 			msgKey := fmt.Sprintf("%s_%d", key, i)
 			msgVal, err := linKV.Read(context.Background(), msgKey)
 			if err == nil {
